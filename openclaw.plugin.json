@@ -1,0 +1,45 @@
+{
+  "id": "minecraft",
+  "name": "Minecraft",
+  "description": "Control a Minecraft bot via mineflayer — move, mine, build, fight, and manage inventory from OpenClaw.",
+  "version": "1.0.0",
+  "skills": ["skills/minecraft"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "host": {
+        "type": "string",
+        "default": "localhost",
+        "description": "Minecraft server host"
+      },
+      "port": {
+        "type": "integer",
+        "default": 25565,
+        "description": "Minecraft server port"
+      },
+      "username": {
+        "type": "string",
+        "default": "OpenClaw",
+        "description": "Bot username"
+      },
+      "version": {
+        "type": "string",
+        "default": "1.21.10",
+        "description": "Minecraft version"
+      },
+      "autoConnect": {
+        "type": "boolean",
+        "default": false,
+        "description": "Connect to the server automatically when the plugin loads"
+      }
+    }
+  },
+  "uiHints": {
+    "host": { "label": "Server Host", "placeholder": "localhost" },
+    "port": { "label": "Server Port", "placeholder": "25565" },
+    "username": { "label": "Bot Username", "placeholder": "OpenClaw" },
+    "version": { "label": "MC Version", "placeholder": "1.20.4" },
+    "autoConnect": { "label": "Auto-Connect on Load" }
+  }
+}
