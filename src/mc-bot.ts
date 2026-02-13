@@ -4,6 +4,8 @@
 import mineflayer, { type Bot } from "mineflayer";
 import { createRequire } from "node:module";
 import { pathfinder, Movements, goals } from "mineflayer-pathfinder";
+import { Vec3 } from "vec3";
+import { initAutonomous, shutdownAutonomous } from "./autonomous.js";
 
 const require = createRequire(import.meta.url);
 
@@ -93,6 +95,7 @@ export function connect(cfg: McConfig): Promise<BotState> {
       }
 
       logger.info(`[MC] Bot spawned as ${b.username}`);
+      initAutonomous(b, logger);
       resolve(snapshot());
     });
 
@@ -106,6 +109,7 @@ export function connect(cfg: McConfig): Promise<BotState> {
 
     b.on("end", (reason: string) => {
       logger.warn(`[MC] Disconnected: ${reason}`);
+      shutdownAutonomous();
       bot = null;
       currentStatus = "disconnected";
     });
@@ -118,6 +122,7 @@ export function connect(cfg: McConfig): Promise<BotState> {
 
 export function disconnect(): string {
   if (!bot) return "Already disconnected.";
+  shutdownAutonomous();
   bot.quit();
   bot = null;
   currentStatus = "disconnected";
@@ -153,6 +158,31 @@ export function snapshot(): BotState {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Wait for the bot to reach a goal (with timeout). */
+function waitForGoal(b: Bot, timeout = 30000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      b.pathfinder.stop();
+      reject(new Error("Pathfinding timed out."));
+    }, timeout);
+
+    b.once("goal_reached", () => { clearTimeout(timer); resolve(); });
+    b.once("path_stop", () => { clearTimeout(timer); resolve(); });
+  });
+}
+
+/** Navigate to a position and wait until arrival. */
+async function navigateTo(b: Bot, pos: Vec3, range = 2): Promise<void> {
+  const dist = b.entity.position.distanceTo(pos);
+  if (dist <= range + 1) return; // already in range
+  b.pathfinder.setGoal(new goals.GoalNear(pos.x, pos.y, pos.z, range));
+  await waitForGoal(b);
+}
+
+// ---------------------------------------------------------------------------
 // Actions (used by agent tools)
 // ---------------------------------------------------------------------------
 
@@ -164,9 +194,11 @@ export async function chat(message: string): Promise<string> {
 
 export async function moveTo(x: number, y: number, z: number): Promise<string> {
   const b = getBotOrThrow();
-  const { GoalNear } = goals;
-  b.pathfinder.setGoal(new GoalNear(x, y, z, 1));
-  return `Moving to ${x}, ${y}, ${z}...`;
+  const target = new Vec3(x, y, z);
+  b.pathfinder.setGoal(new goals.GoalNear(x, y, z, 1));
+  await waitForGoal(b);
+  const dist = Math.round(b.entity.position.distanceTo(target) * 10) / 10;
+  return `Arrived near ${x}, ${y}, ${z} (distance: ${dist}).`;
 }
 
 export async function followPlayer(name: string): Promise<string> {
@@ -187,16 +219,26 @@ export function stopActions(): string {
 
 export async function digAt(x: number, y: number, z: number): Promise<string> {
   const b = getBotOrThrow();
-  const block = b.blockAt(b.entity.position.set(x, y, z));
+  const target = new Vec3(x, y, z);
+  const block = b.blockAt(target);
   if (!block || block.name === "air") throw new Error("No solid block at that position.");
+
+  // Move close enough to dig (reach ~4.5 blocks)
+  await navigateTo(b, target, 4);
+
   await b.dig(block);
   return `Dug ${block.name} at ${x}, ${y}, ${z}.`;
 }
 
 export async function placeBlock(x: number, y: number, z: number): Promise<string> {
   const b = getBotOrThrow();
-  const refBlock = b.blockAt(b.entity.position.set(x, y, z));
+  const target = new Vec3(x, y, z);
+  const refBlock = b.blockAt(target);
   if (!refBlock) throw new Error("No reference block at that position.");
+
+  // Move close enough to place
+  await navigateTo(b, target, 4);
+
   const faceVec = b.entity.position.minus(refBlock.position).normalize();
   await b.placeBlock(refBlock, faceVec);
   return "Block placed.";
@@ -214,11 +256,22 @@ export async function collectBlock(blockName: string, count: number): Promise<st
   let collected = 0;
   for (const pos of positions) {
     const block = b.blockAt(pos);
-    if (!block) continue;
+    if (!block || block.name === "air") continue;
+
     try {
-      await b.dig(block);
+      // Navigate close to the block first
+      await navigateTo(b, pos, 4);
+
+      // Re-fetch the block after moving (chunks may have changed)
+      const freshBlock = b.blockAt(pos);
+      if (!freshBlock || freshBlock.name === "air") continue;
+
+      await b.dig(freshBlock);
       collected++;
-    } catch { /* skip */ }
+      logger.info(`[MC] Collected ${freshBlock.name} (${collected}/${count})`);
+    } catch (err: any) {
+      logger.warn(`[MC] Failed to collect at ${pos}: ${err.message}`);
+    }
   }
   return `Collected ${collected}/${positions.length} ${blockName}.`;
 }
@@ -252,37 +305,86 @@ export async function craftItem(itemName: string, count: number): Promise<string
   const itemType = mcData.itemsByName[itemName];
   if (!itemType) throw new Error(`Unknown item: ${itemName}`);
 
-  const craftingTable = b.findBlock({
-    matching: mcData.blocksByName["crafting_table"]?.id,
-    maxDistance: 4,
-  });
+  // First try without a crafting table (2x2 recipes)
+  let craftingTable = null;
+  let recipes = b.recipesFor(itemType.id, null, 1, null);
 
-  const recipes = b.recipesFor(itemType.id, null, null, craftingTable ?? null);
-  if (recipes.length === 0) throw new Error(`No available recipe for ${itemName}.`);
+  if (recipes.length === 0) {
+    // Need a crafting table — find one nearby or within 32 blocks
+    const tableBlock = b.findBlock({
+      matching: mcData.blocksByName["crafting_table"]?.id,
+      maxDistance: 32,
+    });
+
+    if (!tableBlock) {
+      throw new Error(`No available recipe for ${itemName}. No crafting table nearby (need one within 32 blocks for complex recipes).`);
+    }
+
+    // Navigate to the crafting table
+    await navigateTo(b, tableBlock.position, 3);
+
+    craftingTable = tableBlock;
+    recipes = b.recipesFor(itemType.id, null, 1, craftingTable);
+
+    if (recipes.length === 0) {
+      throw new Error(`No available recipe for ${itemName} (missing materials?).`);
+    }
+  }
+
   await b.craft(recipes[0]!, count, craftingTable ?? undefined);
   return `Crafted ${itemName} x${count}.`;
 }
 
-export function attackNearest(): string {
+/** Continuously attack an entity until it's dead or gone. */
+async function attackUntilDead(b: Bot, entity: any): Promise<string> {
+  const name = entity.name ?? (entity as any).username ?? "entity";
+
+  return new Promise((resolve) => {
+    const attackInterval = setInterval(() => {
+      // Entity is dead or removed
+      if (!entity.isValid) {
+        clearInterval(attackInterval);
+        b.pathfinder.stop();
+        resolve(`Killed ${name}.`);
+        return;
+      }
+
+      const dist = b.entity.position.distanceTo(entity.position);
+
+      if (dist > 4) {
+        // Chase the target
+        b.pathfinder.setGoal(new goals.GoalFollow(entity, 2), true);
+      } else {
+        b.attack(entity);
+      }
+    }, 400); // attack cooldown ~0.4s
+
+    // Safety timeout (60s)
+    setTimeout(() => {
+      clearInterval(attackInterval);
+      b.pathfinder.stop();
+      resolve(`Stopped attacking ${name} (timeout).`);
+    }, 60000);
+  });
+}
+
+export async function attackNearest(): Promise<string> {
   const b = getBotOrThrow();
   const hostile = b.nearestEntity((e) => e.type === "hostile" || e.type === "mob");
   if (!hostile) throw new Error("No hostile mobs nearby.");
-  b.attack(hostile);
-  return `Attacked ${hostile.name ?? "mob"}.`;
+  return attackUntilDead(b, hostile);
 }
 
-export function attackEntity(name: string): string {
+export async function attackEntity(name: string): Promise<string> {
   const b = getBotOrThrow();
   const player = b.players[name];
   if (player?.entity) {
-    b.attack(player.entity);
-    return `Attacked player ${name}.`;
+    return attackUntilDead(b, player.entity);
   }
   // Try finding by entity name
   const entity = b.nearestEntity((e) => e.name === name || (e as any).username === name);
   if (!entity) throw new Error(`Cannot find entity "${name}".`);
-  b.attack(entity);
-  return `Attacked ${entity.name ?? name}.`;
+  return attackUntilDead(b, entity);
 }
 
 export function listPlayers(): string[] {

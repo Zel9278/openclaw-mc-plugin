@@ -3,6 +3,7 @@
 
 import { Type } from "@sinclair/typebox";
 import * as mc from "./mc-bot.js";
+import * as auto from "./autonomous.js";
 
 // ---------------------------------------------------------------------------
 // Helper
@@ -212,13 +213,13 @@ export function registerTools(api: any, resolveConfig: () => mc.McConfig) {
   // ── Attack ───────────────────────────────────────────────────────────
   api.registerTool({
     name: "minecraft_attack",
-    description: "Attack a specific entity/player or the nearest hostile mob.",
+    description: "Attack a specific entity/player or the nearest hostile mob. Continuously attacks until the target is dead.",
     parameters: Type.Object({
       target: Type.Optional(Type.String({ description: "Entity or player name. Omit to attack nearest hostile." })),
     }),
-    execute(_id: string, params: { target?: string }) {
-      if (params.target) return text(mc.attackEntity(params.target));
-      return text(mc.attackNearest());
+    async execute(_id: string, params: { target?: string }) {
+      if (params.target) return text(await mc.attackEntity(params.target));
+      return text(await mc.attackNearest());
     },
   });
 
@@ -250,6 +251,47 @@ export function registerTools(api: any, resolveConfig: () => mc.McConfig) {
     parameters: Type.Object({}),
     execute() {
       return text(`Weather: ${mc.getWeather()}`);
+    },
+  });
+
+  // ── Autonomous behaviors ─────────────────────────────────────────────
+  api.registerTool({
+    name: "minecraft_behavior_start",
+    description: [
+      "Start a continuous background behavior. Available behaviors:",
+      "- auto_eat: Eat food when hunger drops below threshold (config: threshold)",
+      "- guard: Attack hostile mobs within radius (config: radius)",
+      "- auto_collect: Continuously mine a block type (config: block, radius)",
+      "- auto_follow: Follow a player continuously (config: player, distance)",
+      "- patrol: Walk between waypoints in a loop (config: waypoints [{x,y,z}...])",
+    ].join("\n"),
+    parameters: Type.Object({
+      behavior: Type.String({ description: "Behavior name: auto_eat, guard, auto_collect, auto_follow, patrol" }),
+      config: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "Behavior-specific config overrides (e.g. {\"block\": \"oak_log\", \"radius\": 32})" })),
+    }),
+    execute(_id: string, params: { behavior: string; config?: Record<string, unknown> }) {
+      return text(auto.startBehavior(params.behavior, params.config));
+    },
+  });
+
+  api.registerTool({
+    name: "minecraft_behavior_stop",
+    description: "Stop a running background behavior, or stop all behaviors if name is omitted.",
+    parameters: Type.Object({
+      behavior: Type.Optional(Type.String({ description: "Behavior name to stop. Omit to stop all." })),
+    }),
+    execute(_id: string, params: { behavior?: string }) {
+      if (params.behavior) return text(auto.stopBehavior(params.behavior));
+      return text(auto.stopAllBehaviors());
+    },
+  });
+
+  api.registerTool({
+    name: "minecraft_behavior_list",
+    description: "List all available behaviors and their running status.",
+    parameters: Type.Object({}),
+    execute() {
+      return json(auto.listBehaviors());
     },
   });
 }

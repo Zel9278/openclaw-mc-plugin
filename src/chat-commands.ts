@@ -278,12 +278,12 @@ const commands: ChatCommand[] = [
     aliases: ["fight", "kill"],
     description: "Attack a player or nearest hostile",
     usage: "!attack [target]",
-    execute(_bot, _sender, args, reply) {
+    async execute(_bot, _sender, args, reply) {
       try {
         if (args[0]) {
-          reply(mc.attackEntity(args[0]));
+          reply(await mc.attackEntity(args[0]));
         } else {
-          reply(mc.attackNearest());
+          reply(await mc.attackNearest());
         }
       } catch (e: any) {
         reply(e.message);
